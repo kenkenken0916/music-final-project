@@ -70,6 +70,3 @@ python music_composer.py
 ## 授權
 
 本專案採用 MIT 授權條款，詳情請參閱 [LICENSE](LICENSE) 文件。
-=======
-# music-final-project
->>>>>>> 597bc179a58603936f26fa1b208b29d4d05a3002
