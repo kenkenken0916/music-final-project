@@ -2,6 +2,12 @@ import curses
 from music21 import *
 import math
 import os
+import copy
+from wcwidth import wcswidth
+
+def str_width(s):
+    """計算字串在終端機中的實際寬度"""
+    return wcswidth(str(s))
 
 # ========== 音樂生成核心 ==========
 
@@ -46,24 +52,21 @@ def generate_extended_melody(selected_notes, num_measures=4):
     
     if not scale:
         scale = C_MAJOR  # 如果沒有選擇音符，使用 C 大調
-        user_notes = [0, 2, 4, 5, 7]  # 使用簡單的音階
-
-    # 生成主要段落
+        user_notes = [0, 2, 4, 5, 7]  # 使用簡單的音階    # 生成主要段落
     notes_A, durs_A = generate_melody(user_notes, scale, variation=0, transpose=0)  # 原始主題
     
     # 生成第一個過渡段 - 使用上行音階
     transition1_notes = user_notes[:3] * 2  # 重複前三個音
-    notes_T1, durs_T1 = generate_melody(transition1_notes, scale, variation=1, transpose=2)
-    
-    # 生成B段 - 升七度的變化
-    notes_B, durs_B = generate_melody(user_notes, scale, variation=0, transpose=7)
+    notes_T1, durs_T1 = generate_melody(transition1_notes, scale, variation=1, transpose=0)
+      # 生成B段 - 保持在相同調性
+    notes_B, durs_B = generate_melody(user_notes, scale, variation=0, transpose=0)
     
     # 生成第二個過渡段 - 使用下行音階
     transition2_notes = list(reversed(user_notes[-3:]))  # 使用最後三個音的反向
-    notes_T2, durs_T2 = generate_melody(transition2_notes, scale, variation=1, transpose=-2)
+    notes_T2, durs_T2 = generate_melody(transition2_notes, scale, variation=1, transpose=0)
     
-    # 生成C段 - 使用不同的節奏變化和升五度
-    notes_C, durs_C = generate_melody(user_notes[::2], scale, variation=1, transpose=5)  # 使用間隔的音符
+    # 生成C段 - 使用不同的節奏變化
+    notes_C, durs_C = generate_melody(user_notes[::2], scale, variation=1, transpose=0)  # 使用間隔的音符
     
     # 生成最後的A段變奏
     reversed_notes = list(reversed(user_notes))  # 反向主題
@@ -130,23 +133,23 @@ note_names = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4']
 def get_arpeggio_patterns():
     return {
         "基本和弦": lambda chord_notes, duration: [
-            (chord_notes, 4.0)
+            (chord_notes, 4.0)  # 一小節一個和弦
         ],
         "上升琶音": lambda chord_notes, duration: [
-            (note, duration) for note in chord_notes * 2
-        ],
+            (note, 0.5) for note in chord_notes  # 每個音符半拍
+        ] * 2,  # 重複兩次以填滿小節
         "下降琶音": lambda chord_notes, duration: [
-            (note, duration) for note in list(reversed(chord_notes)) * 2
-        ],
+            (note, 0.5) for note in reversed(chord_notes)  # 每個音符半拍
+        ] * 2,  # 重複兩次以填滿小節
         "上下琶音": lambda chord_notes, duration: [
-            (note, duration) for note in chord_notes + list(reversed(chord_notes))
+            (note, 0.5) for note in chord_notes + list(reversed(chord_notes[1:-1]))  # 避免重複首尾音
         ],
         "阿爾伯蒂低音": lambda chord_notes, duration: [
-            (chord_notes[0], duration),
-            (chord_notes[2], duration),
-            (chord_notes[1], duration),
-            (chord_notes[2], duration)
-        ]
+            (chord_notes[0], 0.5),  # 低音，更長的時值
+            (chord_notes[2], 0.5),  # 高音
+            (chord_notes[1], 0.5),  # 中音
+            (chord_notes[2], 0.5),  # 高音
+        ] * 2  # 重複兩次以保持節奏感
     }
 
 def generate_accompaniment(chord_notes, pattern_names, total_measures):
@@ -180,55 +183,163 @@ def generate_accompaniment(chord_notes, pattern_names, total_measures):
     
     return accompaniment_parts
 
-def build_score(selected_notes, chord_name, pattern_instruments, output_filename):
+def build_score(selected_notes, pattern_instruments, output_filename):
     # 生成延伸旋律
     full_notes, full_durations = generate_extended_melody(selected_notes)
     
-    # 主旋律部分
-    melody = stream.Part()
-    melody.insert(0, instrument.Piano())
+    # 分析主旋律的調性
+    melody_notes = []
+    for row in selected_notes:
+        for note_name in row:
+            if note_name:
+                n = note.Note(note_name)
+                melody_notes.append(n)
+                
+    # 檢測主旋律的調性和移調量
+    if melody_notes:
+        # 創建一個包含所有旋律音符的小節
+        measure = stream.Measure()
+        for n in melody_notes:
+            measure.append(n)
+              # 分析調性
+        key_analysis = analysis.discrete.analyzeStream(measure, 'key')
+        if key_analysis:
+            transposition_interval = interval.Interval(key_analysis.tonic, pitch.Pitch('C'))
+            transposition_semitones = transposition_interval.semitones
+        else:
+            transposition_semitones = 0
+    else:
+        transposition_semitones = 0
+      # 主旋律部分
+    melody = stream.Stream()
     melody.insert(0, meter.TimeSignature('4/4'))
+    
+    # 設定當前時間位置
+    current_time = 0.0
     
     # 加入原始選擇的音符
     for row in selected_notes:
         for col in row:
             if col:
                 nn = note.Note(col)
+                # 將音符移調到 C 調（如果需要）
+                nn.transpose(transposition_semitones, inPlace=True)
                 nn.quarterLength = 1.0
-                melody.append(nn)
+                melody.insert(current_time, nn)
+                current_time += 1.0
     
-    # 加入延伸的旋律
-    for pitch, duration in zip(full_notes, full_durations):
-        nn = note.Note(pitch)
+    # 加入延伸的旋律（已經根據調性移調）
+    for pitch_val, duration in zip(full_notes, full_durations):
+        nn = note.Note(pitch_val)
+        # 將延伸旋律也移調到相同的調性
+        nn.transpose(transposition_semitones, inPlace=True)
         nn.quarterLength = duration
-        melody.append(nn)
+        melody.insert(current_time, nn)
+        current_time += duration
     
-    melody.makeMeasures(inPlace=True)
+    # 轉換成包含小節的樂段
+    melody_part = stream.Part()
+    melody_part.insert(0, instrument.Piano())
+    melody_part.append(meter.TimeSignature('4/4'))
+    measures = melody.makeMeasures()
+    for m in measures:
+        melody_part.append(m)
+    melody = melody_part
     
     # 計算小節數
     total_measures = len(melody.measures(0, None))
     
+    # 分析旋律並自動選擇和弦
+    chords = suggest_chords(selected_notes)
+    recommended_chord = chords[0][0]
+    
+    # 根據旋律的調性建立和弦進行
+    chord_progression = []
+    # 分析主和弦的調性並創建更豐富的和弦進行
+    if recommended_chord.startswith('C'):
+        # C調的和弦進行：I-vi-IV-V-I-II7-V7-I
+        base_progression = ['C', 'Am', 'F', 'G', 'C', 'Dm7', 'G7', 'C']
+    elif recommended_chord.startswith('G'):
+        # G調的和弦進行：I-vi-IV-V-I-II7-V7-I
+        base_progression = ['G', 'Em', 'C', 'D', 'G', 'Am7', 'D7', 'G']
+    elif recommended_chord.startswith('F'):
+        # F調的和弦進行：I-vi-IV-V-I-II7-V7-I
+        base_progression = ['F', 'Dm', 'Bb', 'C', 'F', 'Gm7', 'C7', 'F']
+    else:
+        # 預設使用C調
+        base_progression = ['C', 'Am', 'F', 'G', 'C', 'Dm7', 'G7', 'C']
+    
+    # 為每個小節指定和弦，使用更長的和弦進行
+    for i in range(total_measures):
+        chord_idx = i % len(base_progression)
+        if i > 0 and i % 8 == 0:  # 每8小節後
+            # 加入一些變化，使用替代和弦
+            if base_progression[0] == 'C':
+                base_progression = ['Cmaj7', 'Am7', 'Fmaj7', 'G7', 'C', 'Dm7', 'G7', 'C']
+            elif base_progression[0] == 'G':
+                base_progression = ['Gmaj7', 'Em7', 'Cmaj7', 'D7', 'G', 'Am7', 'D7', 'G']
+            elif base_progression[0] == 'F':
+                base_progression = ['Fmaj7', 'Dm7', 'Bbmaj7', 'C7', 'F', 'Gm7', 'C7', 'F']
+        chord_progression.append(base_progression[chord_idx])
+    
     # 生成伴奏部分
     accompaniment_parts = []
-    for pattern_name, inst in pattern_instruments:
-        chord_part = stream.Part()
-        chord_part.insert(0, inst)  # 使用選擇的樂器
-        
-        pattern_func = get_arpeggio_patterns()[pattern_name]
-        for _ in range(total_measures):
-            note_pattern = pattern_func(chord_library[chord_name], 0.5 if pattern_name != "基本和弦" else 4.0)
-            for note_name, duration in note_pattern:
-                if isinstance(note_name, list):  # 如果是和弦
-                    ch = chord.Chord(note_name)
-                    ch.quarterLength = duration
-                    chord_part.append(ch)
-                else:  # 如果是單音
-                    n = note.Note(note_name)
-                    n.quarterLength = duration
-                    chord_part.append(n)
-        
-        chord_part.makeMeasures(inPlace=True)
-        accompaniment_parts.append(chord_part)
+    if pattern_instruments:  # 只有在有選擇琶音模式時才生成伴奏
+        for pattern_name, inst in pattern_instruments:
+            chord_part = stream.Part()
+            chord_part.insert(0, inst)  # 使用選擇的樂器
+            
+            pattern_func = get_arpeggio_patterns()[pattern_name]
+            current_measure = 0
+            
+            while current_measure < total_measures:
+                chord_idx = current_measure // 4
+                current_chord = chord_progression[min(chord_idx, len(chord_progression) - 1)]
+                
+                # 獲取和弦音符並進行移調
+                chord_notes = chord_library[current_chord]
+                transposed_chord_notes = []
+                for chord_note in chord_notes:
+                    n = note.Note(chord_note)
+                    n.transpose(transposition_semitones, inPlace=True)
+                    transposed_chord_notes.append(n.nameWithOctave)
+                
+                note_pattern = pattern_func(transposed_chord_notes, 0.5 if pattern_name != "基本和弦" else 4.0)
+                for note_name, duration in note_pattern:
+                    if isinstance(note_name, list):  # 如果是和弦
+                        ch = chord.Chord(note_name)
+                        ch.quarterLength = duration
+                        chord_part.append(ch)
+                    else:  # 如果是單音
+                        n = note.Note(note_name)
+                        n.quarterLength = duration
+                        chord_part.append(n)
+                
+                current_measure += 1
+            
+            # 確保伴奏與主旋律長度一致
+            chord_part.makeMeasures(inPlace=True)
+            # 如果伴奏部分比主旋律短，補足到相同長度
+            while len(chord_part.measures(0, None)) < total_measures:
+                last_measure = chord_part.measures(0, None)[-1]
+                # 創建一個新的小節並複製原小節的內容
+                new_measure = stream.Measure()
+                for element in last_measure:
+                    if isinstance(element, note.Note):
+                        # 為音符創建新的獨立實例，使用基本屬性
+                        new_note = note.Note()
+                        new_note.pitch = copy.deepcopy(element.pitch)
+                        new_note.quarterLength = element.quarterLength
+                        new_measure.append(new_note)
+                    elif isinstance(element, chord.Chord):
+                        # 為和弦創建新的獨立實例，使用基本屬性
+                        pitches = [copy.deepcopy(p) for p in element.pitches]
+                        new_chord = chord.Chord(pitches)
+                        new_chord.quarterLength = element.quarterLength
+                        new_measure.append(new_chord)
+                chord_part.append(new_measure)
+            
+            accompaniment_parts.append(chord_part)
     
     # 合成總譜
     score = stream.Score()
@@ -327,9 +438,18 @@ def select_notes_screen(stdscr):
         return None
     
     def draw_screen():
+        height, width = stdscr.getmaxyx()
+        title = "輸入旋律音符######"  # 在這裡定義title
         stdscr.clear()
+        
+        # 檢查有足夠的空間
+        if height < 20 or width < 80:
+            stdscr.addstr(0, 0, "請調整視窗大小（至少需要80x20）")
+            stdscr.refresh()
+            return
+            
         # 標題和基本操作說明
-        stdscr.addstr(1, 5, "輸入旋律音符", curses.A_BOLD)
+        stdscr.addstr(1, 5, title, curses.A_BOLD)
         stdscr.addstr(2, 5, "基本操作：", curses.A_NORMAL)
         stdscr.addstr(3, 5, "← → = 移動游標", curses.A_NORMAL)
         stdscr.addstr(4, 5, "空格 = 切換輸入模式", curses.A_NORMAL)
@@ -487,69 +607,120 @@ def select_pattern_screen(stdscr):
     selected_patterns = []  # 儲存已選擇的琶音模式和對應的樂器
     in_instrument_selection = False  # 是否正在選擇樂器
     temp_pattern = None  # 暫存正在配置樂器的琶音模式
+    want_accompaniment = None  # 是否要使用伴奏
     
     def draw_screen():
+        height, width = stdscr.getmaxyx()
         stdscr.clear()
-        stdscr.addstr(1, 5, "選擇琶音模式和樂器", curses.A_BOLD)
-        stdscr.addstr(2, 5, "操作說明：", curses.A_NORMAL)
-        stdscr.addstr(3, 5, "空格 = 選擇琶音模式", curses.A_NORMAL)
-        stdscr.addstr(4, 5, "Enter = 完成並繼續", curses.A_NORMAL)
         
-        # 顯示已選擇的琶音模式和樂器
-        y_offset = 6
-        for i, (pat, inst) in enumerate(selected_patterns):
-            stdscr.addstr(y_offset + i, 10, f"✓ {pat} - 使用{inst}")
+        if height < 20 or width < 80:
+            stdscr.addstr(0, 0, "請調整視窗大小（至少需要80x20）")
+            stdscr.refresh()
+            return
+            
+        title = "選擇是否要加入伴奏#########"
+        if want_accompaniment is not None:
+            if want_accompaniment:
+                title = "選擇旋律模式和樂器（空格鍵選擇）################"
+            else:
+                title = "將只使用主旋律（無伴奏）"
+                
+        # 顯示標題
+        stdscr.addstr(1, 5, title, curses.A_BOLD)
         
-        y_offset = y_offset + len(selected_patterns) + 2
+        base_x = 5  # 基本縮排
         
-        if in_instrument_selection:
-            # 顯示樂器選擇列表
-            stdscr.addstr(y_offset - 1, 5, f"為「{temp_pattern}」選擇樂器：", curses.A_BOLD)
-            for i, inst in enumerate(instruments):
+        if want_accompaniment is None:
+            # 顯示是否要加入伴奏的選項
+            stdscr.addstr(3, base_x, "是否要加入伴奏？########", curses.A_BOLD)
+            stdscr.addstr(5, base_x, "↑↓ = 選擇", curses.A_NORMAL)
+            stdscr.addstr(6, base_x, "Enter = 確認", curses.A_NORMAL)
+            
+            options = ["是", "否"]
+            for i, opt in enumerate(options):
                 attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
-                stdscr.addstr(y_offset + i, 10, f"[{inst}]", attr)
-        else:
-            # 顯示琶音模式列表
-            for i, pat in enumerate(patterns):
-                if not any(p[0] == pat for p in selected_patterns):  # 只顯示未選擇的模式
+                stdscr.addstr(8 + i, base_x + 4, opt, attr)
+        
+        elif want_accompaniment:
+            # 顯示琶音模式選擇
+            stdscr.addstr(3, base_x, "操作說明：", curses.A_NORMAL)
+            stdscr.addstr(4, base_x, "空格 = 選擇琶音模式", curses.A_NORMAL)
+            stdscr.addstr(5, base_x, "Enter = 完成並繼續", curses.A_NORMAL)
+            stdscr.addstr(6, base_x, "ESC = 返回", curses.A_NORMAL)
+            
+            # 顯示已選擇的琶音模式和樂器
+            y_offset = 8
+            for i, (pat, inst) in enumerate(selected_patterns):
+                stdscr.addstr(y_offset + i, 10, f"✓ {pat} - 使用{inst}")
+            
+            y_offset = y_offset + len(selected_patterns) + 2
+            
+            if in_instrument_selection:
+                # 顯示樂器選擇列表
+                stdscr.addstr(y_offset - 1, 5, f"為「{temp_pattern}」選擇樂器：", curses.A_BOLD)
+                for i, inst in enumerate(instruments):
                     attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
-                    stdscr.addstr(y_offset + i, 10, f"[ ] {pat}", attr)
-
+                    stdscr.addstr(y_offset + i, 10, f"[{inst}]", attr)
+            else:
+                # 顯示琶音模式列表
+                for i, pat in enumerate(patterns):
+                    if not any(p[0] == pat for p in selected_patterns):
+                        attr = curses.A_REVERSE if i == current_idx else curses.A_NORMAL
+                        stdscr.addstr(y_offset + i, 10, f"[ ] {pat}", attr)
+        
         stdscr.refresh()
     
     while True:
         draw_screen()
         key = stdscr.getch()
         
-        if in_instrument_selection:
+        if want_accompaniment is None:
             if key == curses.KEY_UP:
-                current_idx = (current_idx - 1) % len(instruments)
+                current_idx = (current_idx - 1) % 2
             elif key == curses.KEY_DOWN:
-                current_idx = (current_idx + 1) % len(instruments)
-            elif key == ord('\n') or key == 10:  # 確認選擇樂器
-                selected_patterns.append((temp_pattern, instruments[current_idx]))
-                in_instrument_selection = False
-                temp_pattern = None
+                current_idx = (current_idx + 1) % 2
+            elif key == ord('\n') or key == 10:  # Enter鍵
+                want_accompaniment = (current_idx == 0)  # 0="是"，1="否"
+                if not want_accompaniment:
+                    break
                 current_idx = 0
-            elif key == 27:  # ESC取消選擇
-                in_instrument_selection = False
-                temp_pattern = None
-                current_idx = 0
-        else:
-            if key == curses.KEY_UP:
-                current_idx = (current_idx - 1) % len(patterns)
-            elif key == curses.KEY_DOWN:
-                current_idx = (current_idx + 1) % len(patterns)
-            elif key == ord(' '):
-                # 選擇琶音模式後進入樂器選擇
-                if not any(p[0] == patterns[current_idx] for p in selected_patterns):
-                    temp_pattern = patterns[current_idx]
-                    in_instrument_selection = True
+                
+        elif want_accompaniment:
+            if in_instrument_selection:
+                if key == curses.KEY_UP:
+                    current_idx = (current_idx - 1) % len(instruments)
+                elif key == curses.KEY_DOWN:
+                    current_idx = (current_idx + 1) % len(instruments)
+                elif key == ord('\n') or key == 10:  # 確認選擇樂器
+                    selected_patterns.append((temp_pattern, instruments[current_idx]))
+                    in_instrument_selection = False
+                    temp_pattern = None
                     current_idx = 0
-            elif key == ord('\n') or key == 10:
-                if not selected_patterns:  # 如果沒有選擇，預設選擇第一個配鋼琴
-                    selected_patterns.append((patterns[0], "鋼琴"))
-                break
+                elif key == 27:  # ESC取消選擇
+                    in_instrument_selection = False
+                    temp_pattern = None
+                    current_idx = 0
+            else:
+                if key == curses.KEY_UP:
+                    current_idx = (current_idx - 1) % len(patterns)
+                elif key == curses.KEY_DOWN:
+                    current_idx = (current_idx + 1) % len(patterns)
+                elif key == 27:  # ESC返回選擇是否使用伴奏
+                    want_accompaniment = None
+                    current_idx = 0
+                    selected_patterns = []
+                elif key == ord(' '):
+                    # 選擇琶音模式後進入樂器選擇
+                    if not any(p[0] == patterns[current_idx] for p in selected_patterns):
+                        temp_pattern = patterns[current_idx]
+                        in_instrument_selection = True
+                        current_idx = 0
+                elif key == ord('\n') or key == 10:
+                    if selected_patterns:  # 只有在有選擇時才可以結束
+                        break
+    
+    if not want_accompaniment:
+        return []
     
     # 返回選擇的琶音模式和對應的樂器
     return [(pat, AVAILABLE_INSTRUMENTS[inst]) for pat, inst in selected_patterns]
@@ -557,16 +728,33 @@ def select_pattern_screen(stdscr):
 # ========== 介面函數 ==========
 
 def start_screen(stdscr):
+    height, width = stdscr.getmaxyx()
     stdscr.clear()
-    stdscr.addstr(5, 10, "歡迎使用 MIDI 作曲助手", curses.A_BOLD)
-    stdscr.addstr(7, 10, "按任意鍵繼續...")
-    stdscr.refresh()
-    stdscr.getch()
+    
+    welcome_msg = "歡迎使用 MIDI 作曲助手"
+    press_key_msg = "按任意鍵繼續..."
+    
+    # 計算訊息的實際寬度
+    welcome_width = str_width(welcome_msg)
+    press_key_width = str_width(press_key_msg)
+      # 顯示訊息
+    try:
+        stdscr.addstr(2, 5, welcome_msg, curses.A_BOLD)
+        stdscr.addstr(4, 5, press_key_msg)
+        stdscr.refresh()
+        stdscr.getch()
+    except curses.error:
+        # 處理畫面太小的情況
+        stdscr.clear()
+        stdscr.addstr(0, 0, "請調整視窗大小")
+        stdscr.refresh()
+        stdscr.getch()
 
 def main(stdscr):
     curses.curs_set(0)  # 隱藏游標
     start_screen(stdscr)
-      # 選擇旋律音符
+      
+    # 選擇旋律音符
     note_matrix = select_notes_screen(stdscr)
     if not any(any(col) for col in note_matrix):
         stdscr.clear()
@@ -574,16 +762,14 @@ def main(stdscr):
         stdscr.refresh()
         stdscr.getch()
         return
-      # 選擇和弦
-    chord_name = select_chord_screen(stdscr, note_matrix)
     
     # 選擇琶音模式和樂器
     pattern_instruments = select_pattern_screen(stdscr)
-    path = build_score(note_matrix, chord_name, pattern_instruments, 'output.mid')
+    path = build_score(note_matrix, pattern_instruments, 'output.mid')
     
     # 顯示完成訊息
     stdscr.clear()
-    stdscr.addstr(5, 5, f"✅ MIDI已生成: {path}")
+    stdscr.addstr(5, 5, f"✓ MIDI已生成: {path}")
     stdscr.addstr(7, 5, "按任意鍵結束。")
     stdscr.refresh()
     stdscr.getch()
